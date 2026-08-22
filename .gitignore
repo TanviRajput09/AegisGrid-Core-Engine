@@ -1,0 +1,15 @@
+# Python bytecode / cache
+__pycache__/
+*.py[cod]
+
+# Virtual Environments
+.venv/
+env/
+venv/
+
+# Environment variables / secrets
+.env
+
+# Dynamic Data / Large CSVs (except sample datasets)
+*.csv
+!data/sample_11kv_transient.csv
