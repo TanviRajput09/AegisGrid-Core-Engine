@@ -5,11 +5,19 @@ import os
 import json
 import datetime
 import hashlib
+import queue
+import threading
+import time
 
 class SCADAMasterIntegrationEngine:
     def __init__(self, log_filename="scada_audit_chained.log"):
         self.log_filename = log_filename
         self.last_log_hash = "0" * 64  # Initial Genesis Hash for Blockchain-style chaining
+        
+        # In-Memory Ring Buffer (Queue) & Async Worker Setup to prevent UI lockup
+        self.log_queue = queue.Queue(maxsize=1000)
+        self.worker_thread = threading.Thread(target=self._async_log_writer, daemon=True)
+        self.worker_thread.start()
 
     def generate_iec61850_telemetry_payload(self, pipeline_data=None, distance_data=None, protection_data=None):
         """
@@ -65,13 +73,13 @@ class SCADAMasterIntegrationEngine:
             }
         }
 
-        # Secure Append with SHA-256 Chaining
+        # Non-blocking async queue insertion
         self.append_chained_audit_log(payload)
         return payload
 
     def append_chained_audit_log(self, payload_dict):
         """
-        Appends telemetry record using SHA-256 Chained Hashes (NERC CIP Compliance).
+        Pushes telemetry record to in-memory queue to prevent file I/O lockup.
         """
         try:
             raw_data_string = json.dumps(payload_dict, sort_keys=True)
@@ -86,22 +94,36 @@ class SCADAMasterIntegrationEngine:
                 }
             }
 
-            with open(self.log_filename, "a") as log_file:
-                log_file.write(json.dumps(audit_record) + "\n")
-
-            # Update genesis hash chain
+            # Push to queue without blocking
+            if not self.log_queue.full():
+                self.log_queue.put(audit_record)
+            
+            # Update hash chain state immediately
             self.last_log_hash = current_entry_hash
             return current_entry_hash
 
         except Exception as e:
-            print(f"[SECURE AUDIT ERROR] Could not commit chained log: {e}")
+            print(f"[SECURE AUDIT ERROR] Could not buffer audit record: {e}")
             return None
 
+    def _async_log_writer(self):
+        """
+        Background worker thread processing log queue asynchronously.
+        """
+        while True:
+            try:
+                record = self.log_queue.get()
+                with open(self.log_filename, "a") as log_file:
+                    log_file.write(json.dumps(record) + "\n")
+                self.log_queue.task_done()
+            except Exception as e:
+                print(f"[ASYNC WORKER ERROR] Failed writing to log file: {e}")
+            time.sleep(0.01)
+
 def run_aegisgrid_pipeline():
-    print("⚡ [INFO] Starting AegisGrid IEC 61850 SCADA Master Engine...")
+    print("⚡ [INFO] Starting AegisGrid IEC 61850 SCADA Master Engine (Async Audit Enabled)...")
     integrator = SCADAMasterIntegrationEngine()
     
-    # Test Payload Verification
     mock_pipeline = {
         "quality_flag": "GOOD",
         "metrics": {
@@ -124,7 +146,7 @@ def run_aegisgrid_pipeline():
     }
 
     final_payload = integrator.generate_iec61850_telemetry_payload(mock_pipeline, mock_distance, mock_protection)
-    print("⚡ [INFO] Telemetry Payload Generated & Audit Logged Successfully.")
+    print("⚡ [INFO] Telemetry Payload Generated & Pushed to Async Audit Queue.")
 
     print("⚡ [INFO] Launching Control Room Dashboard UI...")
     os.system("streamlit run dashboard/dashboard_app.py")
