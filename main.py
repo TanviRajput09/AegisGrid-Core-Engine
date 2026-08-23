@@ -1,84 +1,72 @@
 # main.py
-# AegisGrid V4.2 - Module 5: IEC 61850 Orchestration & Cryptographic Audit
+# AegisGrid V4.2 - Master Orchestration Pipeline
 # Lead: Tanvi
 
 import os
-import json
-import datetime
-import hashlib
-import queue
-import threading
-
-class SCADAMasterIntegrationEngine:
-    def __init__(self, log_filename="scada_audit_chained.log"):
-        self.log_filename = log_filename
-        self.last_log_hash = "0" * 64
-        self.log_queue = queue.Queue(maxsize=1000)
-        
-        self.writer_thread = threading.Thread(target=self._async_disk_writer, daemon=True)
-        self.writer_thread.start()
-
-    def generate_iec61850_telemetry_payload(self, pipeline_data=None, distance_data=None, protection_data=None):
-        pipeline_data = pipeline_data or {}
-        distance_data = distance_data or {}
-        protection_data = protection_data or {}
-
-        utc_timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        
-        metrics = pipeline_data.get('metrics', {})
-        primary = metrics.get('primary', {})
-
-        payload = {
-            "header": {
-                "system_id": "AEGISGRID_11KV_CSPDCL",
-                "substation_id": "SUB_11KV_DURG_NORTH",
-                "timestamp_utc": utc_timestamp
-            },
-            "iec61850_nodes": {
-                "XCBR1": {"status": protection_data.get("recloser_state", "HEALTHY")},
-                "MMXU1": {"volts_kv": primary.get('v_primary_kv', 11.0)},
-                "PTOC1": {
-                    "hif_arcing_status": protection_data.get("hif_status", "NORMAL"),
-                    "ct_saturation": distance_data.get("ct_saturation_detected", False),
-                    "fault_distance_km": distance_data.get("fault_distance_km", 0.0)
-                }
-            }
-        }
-        self.append_chained_audit_log(payload)
-        return payload
-
-    def append_chained_audit_log(self, payload_dict):
-        raw_data = json.dumps(payload_dict, sort_keys=True)
-        current_hash = hashlib.sha256((raw_data + self.last_log_hash).encode('utf-8')).hexdigest()
-        
-        record = {"telemetry": payload_dict, "hash": current_hash, "prev_hash": self.last_log_hash}
-        self.last_log_hash = current_hash
-        if not self.log_queue.full():
-            self.log_queue.put(record)
-
-    def _async_disk_writer(self):
-        while True:
-            record = self.log_queue.get()
-            try:
-                with open(self.log_filename, "a") as f:
-                    f.write(json.dumps(record) + "\n")
-            except Exception as e:
-                print(f"[ASYNC LOG ERROR]: {e}")
-            self.log_queue.task_done()
+import pandas as pd
+from master_integration import SCADAMasterIntegrationEngine
 
 def run_aegisgrid_pipeline():
-    print("⚡ [INFO] Starting AegisGrid V4.2 Orchestrator...")
-    integrator = SCADAMasterIntegrationEngine()
+    print("⚡ [INFO] Starting AegisGrid V4.2 Master Orchestration Pipeline...")
     
-    mock_pipeline = {"metrics": {"primary": {"v_primary_kv": 11.0}}}
-    mock_distance = {"ct_saturation_detected": False, "fault_distance_km": 4.35}
-    mock_protection = {"recloser_state": "LOCKOUT", "hif_status": "ARCING_DETECTED"}
+    # Initialize the Module 5 Master Integration Engine
+    engine = SCADAMasterIntegrationEngine()
+    
+    # CSV Data Stream / Pipeline Reader for V4.2
+    csv_filepath = "data/sample_11kv_transients.csv"
+    
+    if os.path.exists(csv_filepath):
+        print(f"⚡ [INFO] Loading telemetry data from {csv_filepath}...")
+        df = pd.read_csv(csv_filepath)
+        
+        for index, row in df.iterrows():
+            mock_pipeline = {
+                "quality_flag": row.get('quality', 'GOOD'),
+                "metrics": {
+                    "primary": {
+                        "v_primary_kv": row.get('voltage_kv', 11.0),
+                        "current_a": row.get('current_a', 0.0)
+                    },
+                    "ratios_applied": row.get('ratio', 'CT(400:1), PT(100:1)')
+                }
+            }
+            mock_distance = {
+                "fault_distance_km": row.get('distance_km', 4.35),
+                "directional_flag": row.get('direction', 'FORWARD_FAULT'),
+                "ct_saturation_detected": bool(row.get('ct_saturation', False))
+            }
+            mock_protection = {
+                "protection_action": row.get('action', 'HARD_TRIP_LOTO'),
+                "fault_type": row.get('fault_type', 'L-G (Phase A)'),
+                "recloser_state": row.get('recloser_state', 'LOCKOUT'),
+                "loto_active": bool(row.get('loto_active', True)),
+                "hif_status": row.get('hif_status', 'ARCING_DETECTED'),
+                "status_message": row.get('status_msg', 'Permanent Fault - Locked Out')
+            }
+            
+            engine.generate_iec61850_telemetry_payload(mock_pipeline, mock_distance, mock_protection)
+            
+        print("⚡ [INFO] All CSV telemetry records processed via V4.2 pipeline and async logged.")
+        
+    else:
+        print(f"⚠️ [WARN] {csv_filepath} not found. Executing fallback V4.2 integration payload...")
+        mock_pipeline = {
+            "quality_flag": "GOOD",
+            "metrics": {"primary": {"v_primary_kv": 11.0, "current_a": 480.0}, "ratios_applied": "CT(400:1), PT(100:1)"}
+        }
+        mock_distance = {"fault_distance_km": 4.35, "directional_flag": "FORWARD_FAULT", "ct_saturation_detected": False}
+        mock_protection = {
+            "protection_action": "HARD_TRIP_LOTO", "fault_type": "L-G (Phase A)",
+            "recloser_state": "LOCKOUT", "loto_active": True, "hif_status": "ARCING_DETECTED",
+            "status_message": "Permanent L-G Fault - Breaker Locked Out"
+        }
+        engine.generate_iec61850_telemetry_payload(mock_pipeline, mock_distance, mock_protection)
+        print("⚡ [INFO] Fallback V4.2 payload generated and audit-logged.")
 
-    integrator.generate_iec61850_telemetry_payload(mock_pipeline, mock_distance, mock_protection)
-    print("⚡ [INFO] V4.2 Schema Verified & Logged.")
-
-    print("⚡ [INFO] Launching Control Room Dashboard...")
+    # Launch Control Room Dashboard UI
+    print("⚡ [INFO] Launching Control Room Dashboard UI...")
     os.system("streamlit run dashboard/dashboard_app.py")
 
 if __name__ == "__main__":
     run_aegisgrid_pipeline()
+    
