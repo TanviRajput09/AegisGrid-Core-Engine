@@ -1,4 +1,5 @@
-# main.py - AegisGrid Master Integration, IEC 61850 Telemetry & SHA-256 Audit Logger
+# main.py
+# AegisGrid - Module 5: Master Integration, Arc-HIF State, CT Saturation & Async SHA-256 Logger
 # Lead: Tanvi
 
 import os
@@ -7,40 +8,28 @@ import datetime
 import hashlib
 import queue
 import threading
-import time
 
 class SCADAMasterIntegrationEngine:
     def __init__(self, log_filename="scada_audit_chained.log"):
         self.log_filename = log_filename
-        self.last_log_hash = "0" * 64  # Initial Genesis Hash for Blockchain-style chaining
-        
-        # In-Memory Ring Buffer (Queue) & Async Worker Setup to prevent UI lockup
+        self.last_log_hash = "0" * 64
         self.log_queue = queue.Queue(maxsize=1000)
-        self.worker_thread = threading.Thread(target=self._async_log_writer, daemon=True)
-        self.worker_thread.start()
+        
+        # Async background writer thread (Prevents file I/O thread lock)
+        self.writer_thread = threading.Thread(target=self._async_disk_writer, daemon=True)
+        self.writer_thread.start()
 
-    def generate_iec61850_telemetry_payload(self, pipeline_data=None, distance_data=None, protection_data=None):
-        """
-        Formats backend outputs into standardized IEC 61850 Logical Node telemetry schema:
-        - XCBR: Circuit Breaker Logical Node
-        - MMXU: Measurement Logical Node
-        - PTOC: Protection Logical Node
-        """
+    def generate_iec61850_telemetry_payload(self, pipeline_data=None, distance_data=None, protection_data=None, arc_hif_data=None, ct_saturation_data=None):
         pipeline_data = pipeline_data or {}
         distance_data = distance_data or {}
         protection_data = protection_data or {}
+        arc_hif_data = arc_hif_data or {}
+        ct_saturation_data = ct_saturation_data or {}
 
         utc_timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
-
+        
         metrics = pipeline_data.get('metrics', {})
         primary = metrics.get('primary', {})
-        secondary = metrics.get('secondary', {})
-
-        v_primary_kv = primary.get('voltage_kv', 11.0)
-        i_primary_a = primary.get('current_a', 0.0)
-
-        v_secondary_v = secondary.get('voltage_v', 110.0)
-        i_secondary_a = secondary.get('current_a', 0.0)
 
         payload = {
             "header": {
@@ -57,85 +46,65 @@ class SCADAMasterIntegrationEngine:
                     "action_taken": protection_data.get("protection_action", "NO_ACTION")
                 },
                 "MMXU1_Measurements": {
-                    "primary_volts_kv": v_primary_kv,
-                    "primary_current_a": i_primary_a,
-                    "secondary_volts_v": v_secondary_v,
-                    "secondary_current_a": i_secondary_a,
+                    "primary_volts_kv": primary.get('voltage_kv', 11.0),
+                    "primary_current_a": primary.get('current_a', 0.0),
+                    "ct_saturation_flag": ct_saturation_data.get("is_saturated", False),
+                    "ct_saturation_ratio": ct_saturation_data.get("saturation_ratio", 1.0),
                     "ct_pt_ratio": metrics.get('ratios_applied', "N/A")
                 },
                 "PTOC1_Protection": {
                     "fault_type": protection_data.get("fault_type", "NORMAL"),
                     "directional_flag": distance_data.get("directional_flag", "FORWARD_FAULT"),
                     "calculated_distance_km": distance_data.get("fault_distance_km", 0.0),
-                    "distance_method": distance_data.get("method_used", "NONE"),
+                    "arc_hif_detected": arc_hif_data.get("hif_detected", False),
+                    "arcing_severity_score": arc_hif_data.get("severity_score", 0.0),
                     "status_detail": protection_data.get("status_message", "Operational")
                 }
             }
         }
-
-        # Non-blocking async queue insertion
         self.append_chained_audit_log(payload)
         return payload
 
     def append_chained_audit_log(self, payload_dict):
-        """
-        Pushes telemetry record to in-memory queue to prevent file I/O lockup.
-        """
-        try:
-            raw_data_string = json.dumps(payload_dict, sort_keys=True)
-            combined_payload = raw_data_string + self.last_log_hash
-            current_entry_hash = hashlib.sha256(combined_payload.encode('utf-8')).hexdigest()
+        raw_data = json.dumps(payload_dict, sort_keys=True)
+        combined = raw_data + self.last_log_hash
+        current_hash = hashlib.sha256(combined.encode('utf-8')).hexdigest()
 
-            audit_record = {
-                "telemetry_data": payload_dict,
-                "audit_security": {
-                    "previous_hash": self.last_log_hash,
-                    "entry_hash": current_entry_hash
-                }
-            }
+        audit_record = {
+            "telemetry_data": payload_dict,
+            "audit_security": {"previous_hash": self.last_log_hash, "entry_hash": current_hash}
+        }
+        self.last_log_hash = current_hash
+        
+        # Non-blocking memory push
+        if not self.log_queue.full():
+            self.log_queue.put(audit_record)
 
-            # Push to queue without blocking
-            if not self.log_queue.full():
-                self.log_queue.put(audit_record)
-            
-            # Update hash chain state immediately
-            self.last_log_hash = current_entry_hash
-            return current_entry_hash
-
-        except Exception as e:
-            print(f"[SECURE AUDIT ERROR] Could not buffer audit record: {e}")
-            return None
-
-    def _async_log_writer(self):
-        """
-        Background worker thread processing log queue asynchronously.
-        """
+    def _async_disk_writer(self):
         while True:
+            record = self.log_queue.get()
             try:
-                record = self.log_queue.get()
-                with open(self.log_filename, "a") as log_file:
-                    log_file.write(json.dumps(record) + "\n")
-                self.log_queue.task_done()
+                with open(self.log_filename, "a") as f:
+                    f.write(json.dumps(record) + "\n")
             except Exception as e:
-                print(f"[ASYNC WORKER ERROR] Failed writing to log file: {e}")
-            time.sleep(0.01)
+                print(f"[ASYNC LOG ERROR]: {e}")
+            self.log_queue.task_done()
 
 def run_aegisgrid_pipeline():
-    print("⚡ [INFO] Starting AegisGrid IEC 61850 SCADA Master Engine (Async Audit Enabled)...")
+    print("⚡ [INFO] Starting AegisGrid IEC 61850 Master Engine (Arc-HIF & CT Saturation Synced)...")
     integrator = SCADAMasterIntegrationEngine()
     
+    # Verification Run with synced parameters
     mock_pipeline = {
         "quality_flag": "GOOD",
         "metrics": {
             "primary": {"voltage_kv": 11.0, "current_a": 480.0},
-            "secondary": {"voltage_v": 110.0, "current_a": 1.2},
             "ratios_applied": "CT(400:1), PT(100:1)"
         }
     }
     mock_distance = {
         "fault_distance_km": 4.35,
-        "directional_flag": "FORWARD_FAULT",
-        "method_used": "HYBRID_WAVELET_IMPEDANCE"
+        "directional_flag": "FORWARD_FAULT"
     }
     mock_protection = {
         "protection_action": "HARD_TRIP_LOTO",
@@ -144,11 +113,21 @@ def run_aegisgrid_pipeline():
         "loto_active": True,
         "status_message": "Permanent L-G Fault - Breaker Locked Out"
     }
+    mock_arc_hif = {
+        "hif_detected": True,
+        "severity_score": 88.5
+    }
+    mock_ct_sat = {
+        "is_saturated": False,
+        "saturation_ratio": 1.02
+    }
 
-    final_payload = integrator.generate_iec61850_telemetry_payload(mock_pipeline, mock_distance, mock_protection)
-    print("⚡ [INFO] Telemetry Payload Generated & Pushed to Async Audit Queue.")
+    final_payload = integrator.generate_iec61850_telemetry_payload(
+        mock_pipeline, mock_distance, mock_protection, mock_arc_hif, mock_ct_sat
+    )
+    print("⚡ [INFO] Fully Synced Telemetry Payload Generated & Queued.")
 
-    print("⚡ [INFO] Launching Control Room Dashboard UI...")
+    print("⚡ [INFO] Launching Dashboard...")
     os.system("streamlit run dashboard/dashboard_app.py")
 
 if __name__ == "__main__":
