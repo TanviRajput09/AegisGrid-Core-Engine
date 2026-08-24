@@ -34,7 +34,7 @@ class SCADAMasterIntegrationEngine:
                     "action_taken": protection_data.get("protection_action", "NO_ACTION")
                 },
                 "MMXU1_Measurements": {
-                    "primary_volts_kv": pipeline_data['metrics']['primary']['voltage_kv'] if pipeline_data else 11.0,
+                    "volts_kv": pipeline_data['metrics']['primary'].get('v_primary_kv', pipeline_data['metrics']['primary'].get('voltage_kv', 11.0)) if (pipeline_data and 'metrics' in pipeline_data and 'primary' in pipeline_data['metrics']) else 11.0,
                     "primary_current_a": pipeline_data['metrics']['primary']['current_a'] if pipeline_data else 0.0,
                     "ct_pt_ratio": pipeline_data['metrics']['ratios_applied'] if pipeline_data else "N/A"
                 },
