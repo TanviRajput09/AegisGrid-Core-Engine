@@ -97,4 +97,22 @@ if run_btn or input_file is not None:
 
 else:
     st.info("👈 Click **▶ Run Fault Detection Engine** to view dashboard analytics.")
+
+import pandas as pd
+import streamlit as st
+
+# Step 1: File Uploader variable grab karo
+uploaded_file = st.sidebar.file_uploader(
+    "Upload 11kV Sensor CSV Data", type=["csv"]
+)
+
+# Step 2: 'Run Engine' button block mein dynamic file pass karo
+if st.sidebar.button("Run Fault Detection Engine"):
+    if uploaded_file is not None:
+        # Pass uploaded CSV buffer directly to data pipeline
+        df = pd.read_csv(uploaded_file)
+        results = run_master_pipeline(df)
+    else:
+        # Fallback to default sample CSV if no file uploaded
+        results = run_master_pipeline("data/default_sample.csv")
   
