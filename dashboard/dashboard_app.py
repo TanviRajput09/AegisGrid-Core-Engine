@@ -8,7 +8,13 @@ import os
 
 # Import Classifier Bridge JSON output
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from classifier.classifier_bridge import get_fault_classification_payload
+import sys
+from pathlib import Path
+
+# Add project root directory to sys.path dynamically
+sys.path.append(str(Path(__file__).resolve().parent.parent))
+
+from CLASSIFIER.classifier_bridge import get_fault_classification_payload
 
 # --------------------------------------------------
 # PAGE CONFIGURATION
